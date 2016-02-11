@@ -1,0 +1,68 @@
+#!/bin/bash
+
+############################
+### Create new snapshots ###
+############################
+
+# Get current date
+TODAY_NAME=$(date +"%m-%d-%y")
+TODAY_DESC=$(date +"%m/%d/%y")
+TIME=$(date +"%H:%M:%S")
+TIMESTAMP=$(date +%s)
+
+# Get Site Names
+SITE_NAME_LIST=( $(ec2-describe-volumes --filter "tag:Auto-Backup=On" | grep Name | awk '{ print $5 }') )
+
+# Get Volume IDs
+VOLUME_ID_LIST=( $(ec2-describe-volumes --filter "tag:Auto-Backup=On" | grep VOLUME | awk '{ print $2 }') )
+
+# Determine how many volumes have Automated Snapshots turned on
+NUM_OF_BACKUPS=${#VOLUME_ID_LIST[@]}
+
+for ((NUM=0; NUM<$NUM_OF_BACKUPS; NUM++)); do
+
+    # Create Snapshot each volume
+    ec2-create-snapshot ${VOLUME_ID_LIST[$NUM]} -d "Automated Backup of "${SITE_NAME_LIST[$NUM]}" on "$TODAY_DESC" at "$TIME
+
+    # Get Snapshot ID for each snapshot just created
+    SNAP_ID=$(ec2-describe-snapshots | grep "Automated Backup of "${SITE_NAME_LIST[$NUM]}" on "$TODAY_DESC" at "$TIME | awk '{ print $2 }')
+
+    # Add Name Tag to each snapshot just created
+    ec2-create-tags $SNAP_ID --tag "Name="${SITE_NAME_LIST[$NUM]}"_Automated_"$TODAY_NAME
+
+    # Add Time-To-Live Tag to each snapshot just created based on Volume TTL value
+    TTL_DAYS=$(ec2-describe-volumes ${VOLUME_ID_LIST[$NUM]} --filter "tag-key=TTL" | grep TTL | awk '{ print $5 }')
+    if [ -n "$TTL_DAYS" ]; then # Checks that TTL is set
+        ec2-create-tags $SNAP_ID --tag "TTL="$TTL_DAYS
+        ec2-create-tags $SNAP_ID --tag "Timestamp="$TIMESTAMP
+    fi
+
+done
+
+############################
+### Delete old snapshots ###
+############################
+
+# Get list of Snapshot IDs to delete
+DELETE_SNAP_ID_LIST=( $(ec2-describe-snapshots --filter "tag-key=TTL" | grep SNAPSHOT | awk '{ print $2 }') )
+
+# Get list of Snapshot TTL values
+DELETE_SNAP_TTL_LIST=( $(ec2-describe-snapshots --filter "tag-key=TTL" | grep TTL | awk '{ print $5 }') )
+
+# Get list of dates Snapshots were created
+DELETE_SNAP_DATE_LIST=( $(ec2-describe-snapshots --filter "tag-key=Timestamp" | grep Timestamp | awk '{ print $5 }') )
+
+# Determine how many snapshots need to be deleted
+NUM_OF_ITEMS_TO_DELETE=${#DELETE_SNAP_ID_LIST[@]}
+
+for ((NUM=0; NUM<$NUM_OF_ITEMS_TO_DELETE; NUM++)); do
+
+    # Set the date criteria for which snapshots should delete
+    DELETE_DATE=$(date +%s --date ${DELETE_SNAP_TTL_LIST[$NUM]}' days ago')
+
+    # Delete snapshots if the timestamp they were tagged with is older than the calculated TTL date
+    if [[ ${DELETE_SNAP_DATE_LIST[$NUM]} < $DELETE_DATE ]]; then
+        ec2-delete-snapshot ${DELETE_SNAP_ID_LIST[$NUM]}
+    fi
+
+done
